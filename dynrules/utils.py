@@ -2,6 +2,11 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import pickle
+import matplotlib.colors as mcolors
+
+
+_ctemp = mcolors.TABLEAU_COLORS
+COLORS = list(_ctemp.keys())*3
 
 
 def move_to_numpy(obj):
@@ -54,3 +59,22 @@ def KL_bernoulli(q_params, prior_probs):
 
 def KL_gaussian(mu, var, prior_mean, prior_var):
     return 0.5*torch.sum(var/prior_var + ((mu-prior_mean)**2)/prior_var - 1.0 - torch.log(var/prior_var))
+
+
+def get_discrete_gradient(t, x, mask_times):
+    # for log, assuming input is xlog
+    ntime, nsubj, notu = x.shape
+    ygrad = np.zeros((ntime-1, nsubj, notu))
+
+    for i in range(ntime-1):
+        dt = t[i+1] - t[i]
+        ygrad[i,:,:] = (x[i+1,:,:] - x[i,:,:])/dt
+
+    xclip = x[:-1,:,:]
+    tclip = t[:-1]
+    if mask_times is not None:
+        # zero out gradients for before introduced
+        for oidx in range(notu):
+            ygrad[tclip<mask_times[oidx],:,oidx] = 0
+
+    return tclip, xclip, ygrad

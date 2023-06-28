@@ -159,6 +159,54 @@ def get_one_rule_masked():
     return t,xlog, mask_times, tind_first
 
 
+def get_one_rule_masked_rescale(scale=1):
+    mask_times = np.array([1.0, 0])
+
+    num_time, num_subj, num_taxa = 1000, 3, 2
+    t =  np.linspace(0,6,num_time)
+    dt = t[1]-t[0] 
+
+    xlog = np.zeros((num_time, num_subj, num_taxa))
+    xlog[0,:,0] = np.log(np.array([0.1, 0.5, 0.7]))
+    xlog[0,:,1] = np.log(np.array([0.8, 0.5, 1.0]))
+
+    a0 = 2.0*scale
+    a1 = 1.3*scale 
+    b0 = 1.0*scale
+    b1 = 0.5*scale
+    alpha = -1.5*scale
+    threshold = 1.7
+
+    for i in range(1,num_time):
+        dyn0 = a0 - b0*np.exp(xlog[i-1,:,0])
+        xlog[i,:,0] = xlog[i-1,:,0] + dyn0*dt*(t[i] > mask_times[0])
+
+        # dyn1 = a1 - b1*np.exp(xlog[i-1,:,1])
+        # xlog[i,:,1] = xlog[i-1,:,1] + dyn1*dt
+        agrowth1 = a1*(np.exp(xlog[i-1,:,0])<threshold) + (a1+alpha)*(np.exp(xlog[i-1,:,0])>=threshold)
+        dyn1 = agrowth1 - b1*np.exp(xlog[i-1,:,1])
+        xlog[i,:,1] = xlog[i-1,:,1] + dyn1*dt
+
+    #* subsample times
+    sample_times = np.array([
+        0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2,\
+        1.4, 1.6, 1.8, 2.0, 2.25, 2.5, 2.75,\
+              3.0, 3.25, 3.5, 4.0, 4.5, 4.8, 5.3, 5.7, 5.9
+    ])
+    t, xlog = subsample_times(t,xlog, sample_times)
+
+    for i in range(num_taxa):
+        xlog[t<mask_times[i],:,i] = np.nan
+
+    #* get first non-nan index:
+    tind_first = np.zeros(num_taxa, dtype=int)
+    for i in range(num_taxa):
+        temp = xlog[:,0,i] #* assuming all subjects same
+        tind_first[i] = int(np.argmax(~np.isnan(temp)))
+
+    return t,xlog, mask_times, tind_first
+
+
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
 

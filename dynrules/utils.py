@@ -78,3 +78,84 @@ def get_discrete_gradient(t, x, mask_times):
             ygrad[tclip<mask_times[oidx],:,oidx] = 0
 
     return tclip, xclip, ygrad
+
+
+def get_data(t, xlog, tind_first, device):
+    num_time, num_subj, num_taxa = xlog.shape   
+    xabs = np.exp(xlog)
+    max_range = 1.1*np.nanmax(xabs, axis=(0,1)) # max over TxS; final shape O
+
+    times = torch.from_numpy(t).to(torch.float)
+    xstd = torch.from_numpy(np.nanstd(xlog, axis=0)).to(torch.float)
+    xlog = torch.from_numpy(xlog).to(torch.float)
+    xmean = torch.nanmean(xlog, dim=0)
+
+    tstd, tmean = torch.std_mean(times)
+    xnorm = (xlog-xmean)/(xstd + 1e-6)
+    xnorm[torch.isnan(xnorm)] = 0
+    # TODO: need to think more about norm-representaiton and latent encoding for masked times...
+    tnorm = (times-tmean)/(tstd + 1e-6)
+
+    xnormflat = xnorm.reshape((num_time,-1))
+    norm_data = torch.cat([tnorm[:,None].T, xnormflat.T]).T
+    norm_data = norm_data.reshape((-1))
+
+    data = {'times': times.to(device),  'log_abundance': xlog.to(device), 'norm_data': norm_data.to(device), 'x_norm': xnorm.to(device), \
+            'tind_first': tind_first}
+    return data, max_range
+
+
+def get_grad_data(tclip, xlogclip, ygrad, tind_first, device):
+    #* get data for grad matching
+    x_data = np.exp(xlogclip)
+    x_data[np.isnan(xlogclip)] = 0
+    times = torch.from_numpy(tclip).to(torch.float)
+    xlog_data = torch.from_numpy(xlogclip).to(torch.float)
+    x_data = torch.from_numpy(x_data).to(torch.float)
+    xlog_grad = torch.from_numpy(ygrad).to(torch.float)
+
+    data = {'times': times.to(device), 'log_abundance': xlog_data.to(device), 
+            'abundance': x_data.to(device), 'gradient_log': xlog_grad.to(device),
+            'tind_first': tind_first}
+    return data
+
+
+def integrate_log_gradient(tfull, ygrad, log_ic, mask_times):
+    ntimes = len(tfull)
+    _, nsubj, ntaxa = ygrad.shape
+
+    x_log_int = np.zeros((ntimes, nsubj, ntaxa))
+    x_log_int[0,:,:] = log_ic
+
+    #* using mask times; integrate each taxa separately
+    for oidx in range(ntaxa):
+        for t in range(1,ntimes):
+            if tfull[t] >= mask_times[oidx]:
+                dt = tfull[t] - tfull[t-1]
+                dyn = ygrad[t-1,:,oidx]
+                x_log_int[t,:,oidx] = x_log_int[t-1,:,oidx] + dyn*dt
+            else:
+                x_log_int[t,:,oidx] = x_log_int[t-1,:,oidx]
+
+    x_int = np.exp(x_log_int)
+    return x_log_int, x_int
+
+
+def get_interaction_matrix_MAP(params):
+    rules = params['rules']
+    dets = params['detectors']
+    #! self interactions are off by definition
+    num_taxa, num_rules = rules.shape
+    inter_mat = np.zeros((num_taxa, num_taxa))
+
+# TODO:  TOPOLOGY MATRIX; get sign of interaction too
+    for i in range(num_taxa):
+        for k in range(num_rules):
+            #* i is target variable, j is effector taxon
+            #* loop through rules for target taxon i
+            if rules[i,k] > 0.5:
+                for j in range(num_taxa):
+                    if dets[i,k,j] > 0.5:
+                        inter_mat[i,j] = 1
+
+    return inter_mat

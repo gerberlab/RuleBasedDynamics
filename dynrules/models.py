@@ -64,6 +64,9 @@ class BernoulliVariable(AnnealedParameter):
         self.p_selectors = torch.tensor(prior_prob, requires_grad=False, dtype=torch.float, device=self.device)
         self.q_params = nn.Parameter(torch.normal(0,1,size=shape), requires_grad=True)
 
+    def manual_set_params(self, value):
+        self.q_params.data = value
+        
     def init_from_grad_match(self, gmatch_data):
         self.q_params.data = torch.from_numpy(gmatch_data).float()
 
@@ -74,7 +77,11 @@ class BernoulliVariable(AnnealedParameter):
         p_log = F.logsigmoid(torch.stack((self.q_params, -self.q_params)))
 
         #* sample variables        
-        self.selectors = gumbel_softmax(p_log, hard=True, dim=0, tau=self.value)[0]
+        # self.selectors = gumbel_softmax(p_log, hard=True, dim=0, tau=self.value)[0]
+        if self.training:
+            self.selectors = gumbel_softmax(p_log, hard=True, dim=0, tau=self.value)[0]
+        else:
+            self.selectors = torch.argmin(p_log, dim=0)
 
         self.q_prob = torch.sigmoid(self.q_params)
         KL = KL_bernoulli(self.q_params, self.p_selectors)
@@ -175,7 +182,7 @@ class RuleDynamics(DynamicsBase):
         sprops = split_props[None,:,:,:]
         splits = torch.sigmoid((xproportion - sprops)/split_temp)
         detectors = splits*taxa_mask[:,None,None,:]
-        
+    #! check, is no self implemented here???    
         rules = torch.prod((1.0-det_select*(1.0-detectors)), dim=-1) # resulting shape: SxKxR
         res = torch.sum(alpha_rules*rule_select*rules, dim=-1) + alpha_default  # SxK
 
@@ -630,158 +637,174 @@ class StochasticDynamics(nn.Module):
         return self.ELBO_loss, logx, dynamics_parameters
 
 
-# class GradientMatching(nn.Module):
-#     def __init__(self, num_taxa, num_subj, num_time, num_rules, empirical_variance, 
-#                  max_range, rule_prior_prob, detector_prior_prob,
-#                  device, mask_times=None, tinds_first=None, split_start_temp=1.0, split_end_temp=0.01, anneal_method="linear",
-#                  concrete_start_temp=0.5, concrete_end_temp=0.001,
-#                  lr=1e-3):
-#         super().__init__()
-#         self.num_taxa = num_taxa
-#         self.num_subj = num_subj
-#         self.num_time = num_time
-#         self.num_rules = num_rules
-#         self.num_covariates = num_taxa
-#         self.num_detectors = self.num_covariates
-#         self.measurement_variance = torch.tensor(empirical_variance).to(device)
-#         self.tinds_first = tinds_first
+class GradientMatchingNew(nn.Module):
+    def __init__(self, num_taxa, num_subj, num_time, num_rules, empirical_variance, 
+                 max_range, rule_prior_prob, detector_prior_prob,
+                 device, mask_times=None, tinds_first=None, split_start_temp=1.0, split_end_temp=0.01, anneal_method="linear",
+                 concrete_start_temp=0.5, concrete_end_temp=0.001,
+                 lr=1e-3):
+        super().__init__()
+        self.num_taxa = num_taxa
+        self.num_subj = num_subj
+        self.num_time = num_time
+        self.num_rules = num_rules
+        self.num_covariates = num_taxa
+        self.num_detectors = self.num_covariates
+        self.measurement_variance = torch.tensor(empirical_variance).to(device)
+        # self.tinds_first = tinds_first
 
-#         self.device = device
-#         self.lr = lr
+        self.device = device
+        self.lr = lr
 
-#         self.max_range = torch.from_numpy(max_range).to(device)
+        self.max_range = torch.from_numpy(max_range).to(device)
 
-#         #* time masks
-#         if mask_times is None:
-#             self.mask_times = -1*torch.ones((self.num_taxa,), device=self.device, requires_grad=False)
-#         else:
-#             self.mask_times = torch.from_numpy(mask_times).to(self.device)
+        #* time masks
+        if mask_times is None:
+            self.mask_times = -1*torch.ones((self.num_taxa,), device=self.device, requires_grad=False)
+        else:
+            self.mask_times = torch.from_numpy(mask_times).to(self.device)
         
-#         self.taxa_mask = torch.ones((num_time, num_subj, num_taxa)).to(self.device)
-#         for i in range(self.num_taxa):
-#             tstart = tinds_first[i]
-#             self.taxa_mask[:tstart,:,i] = 0
+        # self.taxa_mask = torch.ones((num_time, num_subj, num_taxa)).to(self.device)
+        # for i in range(self.num_taxa):
+        #     tstart = tinds_first[i]
+        #     self.taxa_mask[:tstart,:,i] = 0
 
-#         #* model parameters
-#         self.split_temperature = AnnealedParameter(split_start_temp, split_end_temp, method=anneal_method)
+        #* model parameters
+        self.split_temperature = AnnealedParameter(split_start_temp, split_end_temp, method=anneal_method)
 
-#         #* stochastic parameters
-#         self.det_select = BernoulliVariable((self.num_taxa, self.num_rules, self.num_detectors), detector_prior_prob,
-#                                 device, concrete_start_temp, concrete_end_temp)
-#         self.rule_select = BernoulliVariable((self.num_taxa, self.num_rules), rule_prior_prob, device, concrete_start_temp,
-#                                 concrete_end_temp)
+        #* stochastic parameters
+        self.det_select = BernoulliVariable((self.num_taxa, self.num_rules, self.num_detectors), detector_prior_prob,
+                                device, concrete_start_temp, concrete_end_temp)
+        self.rule_select = BernoulliVariable((self.num_taxa, self.num_rules), rule_prior_prob, device, concrete_start_temp,
+                                concrete_end_temp)
 
-#         #* deterministic parameters
-#         self.split_points = nn.Parameter(torch.normal(-1,0.5, size=(self.num_taxa,self.num_rules,self.num_covariates)), requires_grad=True)
-#         self.log_alpha_default = nn.Parameter(torch.normal(0,1, size=(self.num_taxa,)), requires_grad=True)
-#         self.log_beta = nn.Parameter(torch.normal(0,1, size=(self.num_taxa,)), requires_grad=True)
-#         self.alpha_rules = nn.Parameter(torch.normal(0,1, size=(self.num_taxa,self.num_rules)), requires_grad=True)
+        #* deterministic parameters
+        self.split_points = nn.Parameter(torch.normal(0,1, size=(self.num_taxa,self.num_rules,self.num_covariates)), requires_grad=True)
+        self.log_alpha_default = nn.Parameter(torch.normal(0,1, size=(self.num_taxa,)), requires_grad=True)
+        self.log_beta = nn.Parameter(torch.normal(0,1, size=(self.num_taxa,)), requires_grad=True)
+        self.alpha_rules = nn.Parameter(torch.normal(0,1, size=(self.num_taxa,self.num_rules)), requires_grad=True)
 
-#         #* mask to remove 'self interactions'
-#         self.nonself_mask = torch.reshape((1.0 - torch.diag(torch.ones((self.num_taxa,), device=self.device, requires_grad=False)) ), (self.num_taxa, 1, self.num_covariates))
+        #* mask to remove 'self interactions'
+        self.nonself_mask = torch.reshape((1.0 - torch.diag(torch.ones((self.num_taxa,), device=self.device, requires_grad=False)) ), (self.num_taxa, 1, self.num_covariates))
 
-#         #* optimizer
-#         self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        #* optimizer
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
 
-#     def get_params(self):
-#         params = {}
-#         with torch.no_grad():
-#             params['log_likelihood'] = self.log_likelihood.cpu().detach().clone().numpy()
-#             params['KL_rule'] = self.KL_rule.cpu().detach().clone().numpy()
-#             params['KL_det'] = self.KL_det.cpu().detach().clone().numpy()
-#             params['rule_prob'] = self.rule_select.q_prob.cpu().detach().clone().numpy()
-#             params['det_prob'] = self.det_select.q_prob.cpu().detach().clone().numpy()
-#             params['max_range'] = self.max_range.cpu().detach().clone().numpy()
-#             params['split_temperature'] = self.split_temperature.value
-#             params['alpha_rules'] = self.alpha_rules.cpu().detach().clone().numpy()
-#             params['log_beta'] = self.log_beta.cpu().detach().clone().numpy()
-#             params['log_alpha_default'] = self.log_alpha_default.cpu().detach().clone().numpy()
-#             params['split_proportions'] = torch.sigmoid(self.split_points).cpu().detach().clone().numpy()
-#             params['logit_split_proportions'] = self.split_points.cpu().detach().clone().numpy()
-#         return params
+    def manual_set_params(self, params):
+        self.det_select.manual_set_params(params['det_select'])
+        self.rule_select.manual_set_params(params['rule_select'])
+        self.split_points.data = params['split_points']
+        self.log_alpha_default.data = params['log_alpha_default']
+        self.log_beta.data = params['log_beta']
+        self.alpha_rules.data = params['alpha_rules']
+
+    def get_params(self):
+        params = {}
+        with torch.no_grad():
+            params['log_likelihood'] = self.log_likelihood.cpu().detach().clone().numpy()
+            params['KL_rule'] = self.KL_rule.cpu().detach().clone().numpy()
+            params['KL_det'] = self.KL_det.cpu().detach().clone().numpy()
+            params['rule_prob'] = self.rule_select.q_prob.cpu().detach().clone().numpy()
+            params['det_prob'] = self.det_select.q_prob.cpu().detach().clone().numpy()
+            params['max_range'] = self.max_range.cpu().detach().clone().numpy()
+            params['split_temperature'] = self.split_temperature.value
+            params['alpha_rules'] = self.alpha_rules.cpu().detach().clone().numpy()
+            params['log_beta'] = self.log_beta.cpu().detach().clone().numpy()
+            params['log_alpha_default'] = self.log_alpha_default.cpu().detach().clone().numpy()
+            params['split_proportions'] = torch.sigmoid(self.split_points).cpu().detach().clone().numpy()
+            params['logit_split_proportions'] = self.split_points.cpu().detach().clone().numpy()
+        return params
     
-#     def set_temps(self, epoch, num_epochs):
-#         self.split_temperature.anneal(epoch, num_epochs)
-#         self.rule_select.anneal(epoch, num_epochs)
-#         self.det_select.anneal(epoch, num_epochs)
+    def set_temps(self, epoch, num_epochs):
+        self.split_temperature.anneal(epoch, num_epochs)
+        self.rule_select.anneal(epoch, num_epochs)
+        self.det_select.anneal(epoch, num_epochs)
 
-#     # TODO: option to initialize this as well... could be logisitc fits... correlations...
+    # TODO: option to initialize this as well... could be logisitc fits... correlations...
 
-#     def forward(self, input):
-#         times = input['times'] #* for masks
-#         logx_data = input['log_abundance']
-#         x_data = input['abundance']
-#         xlog_grad = input['gradient_log']
+    def set_params_from_data(self, data):
+        x = data['abundance']
+        minval = torch.amin(x, dim=(0,1))
+        maxval = torch.amax(x, dim=(0,1))
+        self.min_range = (minval).to(self.device)
+        max_range = (maxval).to(self.device)
+        self.mrange = max_range - self.min_range
 
-#         # * sample indicators
-#         det_select, KL_det = self.det_select()
-#         rule_select, KL_rule = self.rule_select()
+    def forward(self, input):
+        times = input['times'] #* for masks
+        logx_data = input['log_abundance']
+        x_data = input['abundance']
+        xlog_grad = input['gradient_log']
 
-#         #* evaluate rule function
-#         det_select = det_select*self.nonself_mask
+        # * sample indicators
+        det_select, KL_det = self.det_select()
+        rule_select, KL_rule = self.rule_select()
 
-#         # splits = torch.sigmoid((((x_data-self.min_range)/self.mrange)[:,:,None,None,:] - torch.sigmoid(self.split_points)[None,None,:,:,:])/self.split_temperature.value)
-#         split_temp = self.split_temperature.value
-#         # x_data is size TxSxO 
-#         xproportion = (x_data/self.max_range)[:,:,None,None,:]
-#         sprops = torch.sigmoid(self.split_points)[None,None,:,:,:]
-#         splits = torch.sigmoid((xproportion - sprops)/split_temp)
+        #* evaluate rule function
+        det_select = det_select*self.nonself_mask
 
-#         # splits shape: T x S x O[output] x R x O[input]
-#         detectors = splits*(times[:,None,None,None,None] >= self.mask_times[None,None,None,None,:]) #* mask input from masked taxa
-#         rules = torch.prod((1.0-det_select*(1.0-detectors)), dim=-1)
-#         res = torch.sum(self.alpha_rules*rule_select*rules, dim=-1) + torch.exp(self.log_alpha_default)
+        # splits = torch.sigmoid((((x_data-self.min_range)/self.mrange)[:,:,None,None,:] - torch.sigmoid(self.split_points)[None,None,:,:,:])/self.split_temperature.value)
+        split_temp = self.split_temperature.value
+        # x_data is size TxSxO 
+        xproportion = ((x_data - self.min_range)/self.mrange)[:,:,None,None,:]
+        sprops = torch.sigmoid(self.split_points)[None,None,:,:,:]
+        splits = torch.sigmoid((xproportion - sprops)/split_temp)
 
-#         #* add self-interactions
-#         res = (res - torch.exp(self.log_beta)*x_data)*(times[:,None,None] >= self.mask_times[None,None,:]) #* mask input
+        # splits shape: T x S x O[output] x R x O[input]
+        detectors = splits*(times[:,None,None,None,None] >= self.mask_times[None,None,None,None,:]) #* mask input from masked taxa
+        rules = torch.prod((1.0-det_select*(1.0-detectors)), dim=-1)
+        res = torch.sum(self.alpha_rules*rule_select*rules, dim=-1) + torch.exp(self.log_alpha_default)
 
-#         data_loglik = 0
-#         for i in range(self.num_taxa):
-#             data_loglik += torch.distributions.Normal(loc=xlog_grad[times>=self.mask_times[i],:,:], scale=torch.sqrt(self.measurement_variance)).log_prob(res[times>=self.mask_times[i],:,:]).sum()
+        #* add self-interactions
+        res = (res - torch.exp(self.log_beta)*x_data)*(times[:,None,None] >= self.mask_times[None,None,:]) #* mask input
 
-#         KL = KL_det + KL_rule
-#         self.ELBO_loss = -(data_loglik - KL)
+        data_loglik = 0
+        for i in range(self.num_taxa):
+            data_loglik += torch.distributions.Normal(loc=xlog_grad[times>=self.mask_times[i],:,:], scale=torch.sqrt(self.measurement_variance)).log_prob(res[times>=self.mask_times[i],:,:]).sum()
 
-#         self.KL_det = KL_det
-#         self.KL_rule = KL_rule
-#         self.log_likelihood = data_loglik
+        KL = KL_det + KL_rule
+        self.ELBO_loss = -(data_loglik - KL)
 
-#         rule_params = {'rules': rule_select,
-#             'detectors': det_select,
-#             'max_range': self.max_range,
-#             'split_temperature': self.split_temperature.value,
-#             'alpha_rules': self.alpha_rules,
-#             'alpha_default': torch.exp(self.log_alpha_default),
-#             'beta': torch.exp(self.log_beta),
-#             'split_proportions': torch.sigmoid(self.split_points)}
-#         return self.ELBO_loss, res, rule_params
+        self.KL_det = KL_det
+        self.KL_rule = KL_rule
+        self.log_likelihood = data_loglik
+
+        rule_params = {'rules': rule_select,
+            'detectors': det_select,
+            'max_range': self.max_range,
+            'split_temperature': self.split_temperature.value,
+            'alpha_rules': self.alpha_rules,
+            'alpha_default': torch.exp(self.log_alpha_default),
+            'beta': torch.exp(self.log_beta),
+            'split_proportions': torch.sigmoid(self.split_points)}
+        return self.ELBO_loss, res, rule_params
 
 
-# def train(model, data, num_epochs, save_trace=False):
-#     if save_trace:
-#         param_trace = []
-#     else:
-#         param_trace = None 
+def train(model, data, num_epochs, save_trace=False):
+    if save_trace:
+        param_trace = []
+    else:
+        param_trace = None 
     
-#     model.train()
-#     ELBOs = np.zeros(num_epochs)
+    model.train()
+    ELBOs = np.zeros(num_epochs)
 
-#     for epoch in range(num_epochs):
-#         model.set_temps(epoch, num_epochs)
-#         model.forward(data)
-#         model.optimizer.zero_grad()
-#         model.ELBO_loss.backward()
-#         model.optimizer.step()
+    for epoch in range(num_epochs):
+        model.set_temps(epoch, num_epochs)
+        model.forward(data)
+        model.optimizer.zero_grad()
+        model.ELBO_loss.backward()
+        model.optimizer.step()
 
-#         if save_trace:
-#             param_trace.append(model.get_params())
+        if save_trace:
+            param_trace.append(model.get_params())
 
-#         if epoch % max(int(num_epochs/10), 1) == 0:
-#             print("epoch = ", str(epoch))
-#             print("loss = ", model.ELBO_loss)
+        if epoch % max(int(num_epochs/10), 1) == 0:
+            print("epoch = ", str(epoch))
+            print("loss = ", model.ELBO_loss)
 
-#         ELBOs[epoch] = model.ELBO_loss.cpu().clone().detach().numpy()
-#     return ELBOs, param_trace
+        ELBOs[epoch] = model.ELBO_loss.cpu().clone().detach().numpy()
+    return ELBOs, param_trace
 #! ---------------------------------------------------------------------------------
 
 # class LatentPretrainer(nn.Module):

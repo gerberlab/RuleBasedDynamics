@@ -105,18 +105,18 @@ def get_data(t, xlog, tind_first, device):
     return data, max_range
 
 
-def get_grad_data(tclip, xlogclip, ygrad, tind_first, device):
+def get_grad_data(tclip, xlogclip, ygrad, mask_times, device):
     #* get data for grad matching
     x_data = np.exp(xlogclip)
-    x_data[np.isnan(xlogclip)] = 0
+    x_data[np.isnan(xlogclip)] = 0 # TODO: note, need since 0*nan = nan when masking..., might be better way?
     times = torch.from_numpy(tclip).to(torch.float)
     xlog_data = torch.from_numpy(xlogclip).to(torch.float)
     x_data = torch.from_numpy(x_data).to(torch.float)
     xlog_grad = torch.from_numpy(ygrad).to(torch.float)
 
     data = {'times': times.to(device), 'log_abundance': xlog_data.to(device), 
-            'abundance': x_data.to(device), 'gradient_log': xlog_grad.to(device),
-            'tind_first': tind_first}
+            'abundance': x_data.to(device), 'gradient': xlog_grad.to(device),
+            'mask_times': mask_times}
     return data
 
 
@@ -159,3 +159,7 @@ def get_interaction_matrix_MAP(params):
                         inter_mat[i,j] = 1
 
     return inter_mat
+
+
+def sigmoid(x):
+    return 1.0/(1.0 + np.exp(-x))

@@ -2,3 +2,8 @@ dynrules.egg-info/
 dynrules/experiments/
 dynrules/__pycache__/
 dynrules/temp/
+dynrules/METAG_DATA_metaphlan/
+dynrules/MDSINE2_Paper-main/
+dynrules/PHAGE_DATA/
+dynrules/MD2_DATA/
+dynrules/MDSINE2_comparator_runs/
